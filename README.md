@@ -1,39 +1,141 @@
-# lyf 的第三次求助
+# 视觉组大作业：路线 A
 
-[中文](README.md) · [English](README.en.md)
+本仓库完成路线 A：装甲板检测与位姿估计。
 
-## 云台能动了，然后呢？
+程序逐帧读取比赛录像，使用提供的 ONNX 模型检测装甲板，恢复四个角点到原始图像坐标，使用 NMS 抑制重复检测，并通过平面 PnP 计算装甲板四个物理角点在相机坐标系中的三维坐标。结果以 JSON Lines 格式输出。
 
-在[控制组的作业](https://github.com/HKUAstar/control-training-template)中，
-lyf 把 yaw、pitch 云台教具交给了控制组。这次我们假设他们已经完成程序：
-云台可以回正、跟随目标角度，也能在调试时停止输出。
+## 环境要求
 
-看到云台终于不再反复点头，lyf 松了一口气：“现在能不能让它自己盯着目标转？”
+- Python 3.10 或更高版本
+- CPU 即可，不需要 CUDA
 
-控制组也想试试。他们留出了目标角度接口，准备接上视觉系统。
-但视觉组还得回答两个问题：相机画面里的哪一块是装甲板？
-就算知道它现在在哪里，等弹丸飞过去，它又会转到哪里？
+创建虚拟环境：
 
-这一次，你负责实现视觉链路中的一段。为了让你能在自己的电脑上独立完成，
-我们提供录像、模型、标定和瞄准仿真器。本次不需要真实教具、相机、电机或控制板，
-也不要求与控制组固件通信。故事中的联调只是背景，不是额外的硬件任务。
+```bash
+python -m venv .venv
+```
 
-## 两条路线，任选其一
+Windows Git Bash：
 
-**只需完成检测或瞄准中的一项，不要求两项都做。两条路线互不依赖。**
+```bash
+./.venv/Scripts/python.exe -m pip install -r detection/requirements.txt
+```
 
-| 路线 | 你负责什么 | 已提供什么 | 从哪里开始 |
-| --- | --- | --- | --- |
-| 检测 | 从视频检测装甲板，用 PnP 恢复三维角点，导出 JSONL | 预训练模型、比赛片段、相机标定 | [detection/README.md](detection/README.md) |
-| 瞄准 | 根据延迟送达的目标状态预测装甲板位置，决定瞄准角和开火时机 | 精确的历史观测、弹道工具、3D 仿真、MCAP 回放 | [aiming/README.md](aiming/README.md) |
+Linux / macOS：
 
-检测路线语言不限，推荐 Python、C++ 或 Rust，不需要训练模型。
-瞄准路线使用 Rust，不需要实现检测器、跟踪器或状态估计。
-两者都允许使用参考资料和 AI 工具，但你需要能够解释自己的实现并定位问题。
+```bash
+./.venv/bin/python -m pip install -r detection/requirements.txt
+```
 
-## 开始与提交
+## 运行方法
 
-1. 打开[作业模板](https://github.com/HKUAstar/vision-training-assignment)，点击
-   **Use this template → Create a new repository**，在自己的账号下创建作业仓库。
-2. Clone 自己的仓库，选择检测或瞄准路线，按对应 README 完成作业。
-3. 将完成的代码 commit 并 push 到自己的仓库，然后提交该仓库的 **GitHub URL**。
+处理小装甲板视频：
+
+```bash
+./.venv/Scripts/python.exe detection/detection.py \
+  --model detection/assets/0526.onnx \
+  --video detection/assets/small.mp4 \
+  --calibration detection/assets/calibration.yaml \
+  --output detection/small.jsonl \
+  --confidence 0.5 \
+  --nms-iou 0.5
+```
+
+处理大装甲板视频：
+
+```bash
+./.venv/Scripts/python.exe detection/detection.py \
+  --model detection/assets/0526.onnx \
+  --video detection/assets/large.mp4 \
+  --calibration detection/assets/calibration.yaml \
+  --output detection/large.jsonl \
+  --confidence 0.5 \
+  --nms-iou 0.5
+```
+
+调试时可用 `--max-frames` 限制处理帧数：
+
+```bash
+./.venv/Scripts/python.exe detection/detection.py \
+  --model detection/assets/0526.onnx \
+  --video detection/assets/small.mp4 \
+  --calibration detection/assets/calibration.yaml \
+  --output detection/test.jsonl \
+  --confidence 0.5 \
+  --nms-iou 0.5 \
+  --max-frames 10
+```
+
+Linux / macOS 请将上述命令中的 Python 路径替换为 `./.venv/bin/python`。
+
+## 实现流程
+
+1. 使用 OpenCV 按顺序读取视频帧。
+2. 通过居中 letterbox 将画面等比例缩放到 640 × 640，补边值为 114。
+3. 将图像转换为 RGB、NCHW、float16，并归一化到 `[0, 1]`。
+4. 使用 ONNX Runtime CPU 后端运行模型。
+5. 对 objectness logit 使用 sigmoid，并按照置信度阈值筛选候选。
+6. 解码颜色、图案以及左上、左下、右下、右上四个角点。
+7. 使用缩放比例和补边量将角点恢复到原始图像坐标。
+8. 使用四角点的轴对齐包围框执行类别无关 NMS。
+9. 根据图案类别选择大小装甲板物理模型。
+10. 使用 `SOLVEPNP_IPPE` 产生平面位姿候选，并通过 LM 优化、正深度检查和重投影误差选择有效解。
+11. 将旋转和平移同时作用于四个物理角点，得到相机坐标系中的三维坐标。
+12. 每帧输出一个完整 JSON 对象。
+
+## 装甲板尺寸
+
+| 类型 | 宽度 | 高度 |
+| --- | ---: | ---: |
+| 小装甲板 | 0.135 m | 0.056 m |
+| 大装甲板 | 0.230 m | 0.056 m |
+
+图案 `1` 和 `base_big` 使用大装甲板模型，其余图案使用小装甲板模型。
+
+## 输出格式
+
+输出采用 UTF-8 JSON Lines，每行对应一帧。没有检测的帧示例：
+
+```json
+{"frame_index": 0, "timestamp_s": 0.0, "detections": []}
+```
+
+每个检测包含：
+
+- `color`
+- `pattern`
+- `confidence`
+- `corners_px`
+- `corners_camera_m`
+- `reprojection_error_px`
+
+PnP 失败时仍保留检测，并将 `corners_camera_m` 和 `reprojection_error_px` 写为 `null`。
+
+## 参数说明
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | ---: |
+| `--model` | ONNX 模型路径 | 必填 |
+| `--video` | 输入视频路径 | 必填 |
+| `--calibration` | 相机标定 YAML 路径 | 必填 |
+| `--output` | 输出 JSONL 路径 | 必填 |
+| `--confidence` | objectness 置信度阈值 | 0.5 |
+| `--nms-iou` | NMS IoU 阈值 | 0.5 |
+| `--max-frames` | 可选的调试帧数限制 | 不限制 |
+
+## 验证结果
+
+- `small.mp4`：360 帧
+- `large.mp4`：360 帧
+- JSON 格式、连续帧号和时间戳检查通过
+- 二维与三维角点结构检查通过
+- 输出中没有 NaN 或 Infinity
+- 有效三维角点均位于相机前方
+
+## 主要文件
+
+- `detection/detection.py`：路线 A 主程序
+- `detection/requirements.txt`：Python 依赖
+- `detection/assets/`：教师提供的模型、录像和相机标定
+
+本实现不根据视频文件名、帧范围或目标颜色硬编码检测结果，也不进行跨帧跟踪。

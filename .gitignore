@@ -4,3 +4,8 @@ target
 .env
 .env.*
 !.env.example
+.venv/
+__pycache__/
+*.py[cod]
+detection/*.jsonl
+detection/letterbox-check.jpg
